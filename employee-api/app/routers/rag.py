@@ -11,6 +11,9 @@ from app.schemas.rag import (
 )
 from app.services.user import create_user as create_user_service
 from app.services.rag import RAGService
+from app.services.inventory import InventoryService
+from app.services.ai_agent import AIAgentService
+from app.services.order import OrderService
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
@@ -50,4 +53,19 @@ async def ask_question(request: QuestionRequest, db: AsyncSession = Depends(get_
         )
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+
+
+@router.post("/agent/ask")
+async def ask_agent(request: QuestionRequest, db: AsyncSession = Depends(get_db)):
+    try:
+        inventory_service = InventoryService(db)
+        rag_service = RAGService(db)
+        order_service = OrderService(db)
+        agent = AIAgentService(inventory_service, rag_service, order_service)
+        answer = await agent.ask(request.question)
+        return {"answer": answer}
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(error)
+        )
 

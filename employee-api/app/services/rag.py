@@ -139,8 +139,11 @@ class RAGService:
 
         response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
 
+        raw_answer = response.output_text or ""
+        clean_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
+
         return {
-            "answer": response.output_text,
+            "answer": clean_answer,
             "sources": [
                 {"chunk_id": chunk.id, "source": chunk.source, "distance": distance}
                 for chunk, distance in relevant_results
