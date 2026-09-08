@@ -1,0 +1,17 @@
+Warehouse Receiving Policy
+
+All incoming shipments must be inspected before they are accepted into inventory.
+
+The receiving employee must verify the purchase order number, supplier name, item quantity, and item condition.
+
+Damaged goods must be separated from accepted inventory and reported to the warehouse supervisor.
+
+If the received quantity differs from the purchase order quantity, the discrepancy must be recorded in the warehouse management system.
+
+Items must not be moved to available inventory until the receiving inspection has been completed.
+
+Warehouse employees must scan the item barcode before moving an item into a storage location.
+
+High-value items require supervisor approval before being placed into inventory.
+
+Inventory adjustments must be approved by an authorized warehouse manager.
