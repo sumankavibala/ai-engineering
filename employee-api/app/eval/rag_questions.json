@@ -1,0 +1,18 @@
+[
+  {
+    "question": "What should happen to damaged goods?",
+    "expected_source": "warehouse_receiving_policy.pdf"
+  },
+  {
+    "question": "What information must be verified during receiving?",
+    "expected_source": "warehouse_receiving_policy.pdf"
+  },
+  {
+    "question": "Who approves high-value inventory?",
+    "expected_source": "warehouse_receiving_policy.pdf"
+  },
+  {
+    "question": "What is the company's vacation policy?",
+    "expected_source": null
+  }
+]

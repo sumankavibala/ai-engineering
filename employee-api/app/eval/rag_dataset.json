@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What should happen to damaged goods?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "Damaged goods must be separated from accepted inventory and reported to the warehouse supervisor."
+  },
+  {
+    "question": "What information must be verified during receiving?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "The purchase order number, supplier name, item quantity, and item condition must be verified."
+  },
+  {
+    "question": "Who approves high-value inventory?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "High-value items require supervisor approval."
+  },
+  {
+    "question": "What is the company's vacation policy?",
+    "expected_source": null,
+    "expected_answer": null
+  }
+]

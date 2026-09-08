@@ -62,9 +62,24 @@ class AgentService:
             for call in function_calls:
                 arguments = json.loads(call.arguments)
 
-                result = self.tool_service.execute(
-                    tool_name=call.name, arguments=arguments
+                print(
+                    "agent_tool_call",
+                    extra={
+                        "tool": call.name,
+                        "arguments": arguments,
+                        "call_id": call.call_id
+                    }
                 )
+
+                try:
+                    result = self.tool_service.execute(
+                        tool_name=call.name, arguments=arguments
+                    )
+                except Exception as exc:
+                    result = {
+                        "success": False,
+                        "error": "Tool execution failed."
+                    }
 
                 tool_outputs.append(
                     {
