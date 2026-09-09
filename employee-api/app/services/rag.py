@@ -71,11 +71,16 @@ class RAGService:
     async def ask(self, question: str, top_k: int = 5, department: str | None = None):
 
         SIMILARITY_THRESHOLD = 0.35
-        # 1. Embed question
+        # 1. Embed question and 2. Retrieve relevant chunks
+        retrieval_start = time.perf_counter()
         query_embedding = create_embedding(question)
-
-        # 2. Retrieve relevant chunks
         results = await self.repository.search(query_embedding, top_k, department)
+        rag_retrieval_latency = time.perf_counter() - retrieval_start
+
+        logger.info(
+            "rag_retrieval",
+            extra={"rag_retrieval_latency": rag_retrieval_latency, "latency_seconds": rag_retrieval_latency}
+        )
 
         relevant_results = [
             (chunk, distance)
@@ -141,6 +146,7 @@ class RAGService:
         logger.info(
             "llm_call",
             extra={
+                "llm_latency": elapsed,
                 "latency_seconds": elapsed
             }
         )
@@ -156,8 +162,15 @@ class RAGService:
 
     async def ask_stream(self, question: str, top_k: int = 5, department: str | None = None):
         SIMILARITY_THRESHOLD = 0.35
+        retrieval_start = time.perf_counter()
         query_embedding = create_embedding(question)
         results = await self.repository.search(query_embedding, top_k, department)
+        rag_retrieval_latency = time.perf_counter() - retrieval_start
+
+        logger.info(
+            "rag_retrieval",
+            extra={"rag_retrieval_latency": rag_retrieval_latency, "latency_seconds": rag_retrieval_latency}
+        )
 
         relevant_results = [
             (chunk, distance)
@@ -245,5 +258,5 @@ class RAGService:
             yield buffer
 
         elapsed = time.perf_counter() - start
-        logger.info("llm_call", extra={"latency_seconds": elapsed})
+        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
 

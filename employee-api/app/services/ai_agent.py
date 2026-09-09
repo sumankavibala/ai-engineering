@@ -40,6 +40,7 @@ class AIAgentService:
         logger.info(
             "llm_call",
             extra={
+                "llm_latency": elapsed,
                 "latency_seconds": elapsed
             }
         )
@@ -55,6 +56,7 @@ class AIAgentService:
             name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
 
+            tool_start = time.perf_counter()
             if name == "get_inventory":
                 sku = arguments.get("sku")
                 result = await self.inventory_service.get_inventory(sku=sku)
@@ -70,6 +72,16 @@ class AIAgentService:
                     result = {"error": "Order service unavailable"}
             else:
                 result = {"error": f"Unknown tool: {name}"}
+
+            tool_elapsed = time.perf_counter() - tool_start
+            logger.info(
+                "tool_call",
+                extra={
+                    "tool": name,
+                    "tool_latency": tool_elapsed,
+                    "latency_seconds": tool_elapsed
+                }
+            )
 
             messages.append({
                 "role": "tool",
@@ -90,6 +102,7 @@ class AIAgentService:
         logger.info(
             "llm_call",
             extra={
+                "llm_latency": elapsed,
                 "latency_seconds": elapsed
             }
         )
@@ -107,7 +120,7 @@ class AIAgentService:
             max_tokens=500,
         )
         elapsed = time.perf_counter() - start
-        logger.info("llm_call", extra={"latency_seconds": elapsed})
+        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
 
         message = response.choices[0].message
 
@@ -152,7 +165,7 @@ class AIAgentService:
             if buffer and not in_think_block:
                 yield buffer
             elapsed = time.perf_counter() - start
-            logger.info("llm_call", extra={"latency_seconds": elapsed})
+            logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
             return
 
         messages.append(message)
@@ -161,6 +174,7 @@ class AIAgentService:
             name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
 
+            tool_start = time.perf_counter()
             if name == "get_inventory":
                 sku = arguments.get("sku")
                 result = await self.inventory_service.get_inventory(sku=sku)
@@ -175,6 +189,16 @@ class AIAgentService:
                     result = {"error": "Order service unavailable"}
             else:
                 result = {"error": f"Unknown tool: {name}"}
+
+            tool_elapsed = time.perf_counter() - tool_start
+            logger.info(
+                "tool_call",
+                extra={
+                    "tool": name,
+                    "tool_latency": tool_elapsed,
+                    "latency_seconds": tool_elapsed
+                }
+            )
 
             messages.append({
                 "role": "tool",
@@ -225,5 +249,5 @@ class AIAgentService:
             yield buffer
 
         elapsed = time.perf_counter() - start
-        logger.info("llm_call", extra={"latency_seconds": elapsed})
+        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
 
