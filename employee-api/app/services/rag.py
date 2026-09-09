@@ -4,6 +4,7 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.client import create_embedding, client
 from app.ai.logging_utils import log_token_usage
+from app.ai.retry import call_with_retry
 from app.repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -133,15 +134,19 @@ class RAGService:
         start = time.perf_counter()
 
         try:
-            response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[{"role": "user", "content": prompt}],
+            response = call_with_retry(
+                lambda: client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=[{"role": "user", "content": prompt}],
+                )
             )
             raw_answer = response.choices[0].message.content or ""
             if getattr(response, "usage", None):
                 log_token_usage(response.usage)
         except Exception:
-            response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
+            response = call_with_retry(
+                lambda: client.responses.create(model="openai/gpt-oss-120b", input=prompt)
+            )
             raw_answer = getattr(response, "output_text", "") or ""
             if getattr(response, "usage", None):
                 log_token_usage(response.usage)
@@ -219,11 +224,13 @@ class RAGService:
           """
 
         start = time.perf_counter()
-        stream_response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[{"role": "user", "content": prompt}],
-            stream=True,
-            stream_options={"include_usage": True},
+        stream_response = call_with_retry(
+            lambda: client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+                stream_options={"include_usage": True},
+            )
         )
 
         in_think_block = False
