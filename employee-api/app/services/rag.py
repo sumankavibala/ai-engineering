@@ -2,6 +2,7 @@ import logging
 import re
 import time
 from sqlalchemy.ext.asyncio import AsyncSession
+from langchain.tools import tool
 from app.ai.client import create_embedding, client
 from app.ai.logging_utils import log_token_usage
 from app.ai.retry import call_with_retry
@@ -46,6 +47,10 @@ def chunk_text(
 class RAGService:
     def __init__(self, db: AsyncSession):
         self.repository = DocumentRepository(db)
+
+    async def search_warehouse_policy(self, query: str):
+        """Search warehouse policies and procedures."""
+        return await self.ask(question=query)
 
     async def ingest_document(
         self,

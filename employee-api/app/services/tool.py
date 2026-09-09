@@ -14,7 +14,7 @@ class ToolService:
             return self.inventory_service.get_inventory(sku=arguments["sku"])
 
         if tool_name == "search_warehouse_policy":
-            return self.inventory_service.search(question=arguments["query"])
+            return self.rag_service.ask(question=arguments["query"])
 
         if tool_name == "get_order_status":
             return self.order_service.get_order_status(order_id=arguments["order_id"])

@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.repositories.order import OrderRepository
 
+from langchain.tools import tool
 
 class OrderService:
 
@@ -8,7 +9,7 @@ class OrderService:
         self.repository = OrderRepository(db)
 
     async def get_order_status(self, order_id: int):
-
+        """Get the current status and details of a warehouse order."""
         order = await self.repository.get_order_status(order_id)
 
         if not order:
