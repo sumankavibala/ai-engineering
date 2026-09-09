@@ -3,6 +3,7 @@ import re
 import time
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.client import create_embedding, client
+from app.ai.logging_utils import log_token_usage
 from app.repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -137,9 +138,13 @@ class RAGService:
                 messages=[{"role": "user", "content": prompt}],
             )
             raw_answer = response.choices[0].message.content or ""
+            if getattr(response, "usage", None):
+                log_token_usage(response.usage)
         except Exception:
             response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
             raw_answer = getattr(response, "output_text", "") or ""
+            if getattr(response, "usage", None):
+                log_token_usage(response.usage)
 
         elapsed = time.perf_counter() - start
 
@@ -218,12 +223,15 @@ class RAGService:
             model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         in_think_block = False
         buffer = ""
 
         for chunk in stream_response:
+            if getattr(chunk, "usage", None):
+                log_token_usage(chunk.usage)
             if not getattr(chunk, "choices", None):
                 continue
             delta = chunk.choices[0].delta.content or ""
