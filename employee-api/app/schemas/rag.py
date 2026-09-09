@@ -22,6 +22,7 @@ class QuestionRequest(BaseModel):
     question: str
     top_k: int = 5
     department: str | None = None
+    stream: bool = False
 
 
 class QuestionResponse(BaseModel):

@@ -50,6 +50,7 @@ class AgentService:
                 tools=Tools,
                 max_tokens=500,
                 instructions=AGENT_INSTRUCTIONS,
+                stream=True
             )
 
             elapsed = time.perf_counter() - start
@@ -117,6 +118,7 @@ class AgentService:
                     previous_response_id=response.id,
                     input=tool_outputs,
                     tools=TOOLS,
+                    stream=True
                 )
 
             elapsed = time.perf_counter() - start

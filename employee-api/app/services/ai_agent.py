@@ -1,8 +1,12 @@
 import json
+import logging
 import re
+import time
 
 from app.ai.client import client
 from app.ai.tools import INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL
+
+logger = logging.getLogger(__name__)
 
 
 def strip_thinking_tags(text: str | None) -> str:
@@ -31,7 +35,9 @@ class AIAgentService:
             max_tokens=500,
         )
 
-        print(
+        elapsed = time.perf_counter() - start
+
+        logger.info(
             "llm_call",
             extra={
                 "latency_seconds": elapsed
@@ -79,7 +85,9 @@ class AIAgentService:
             max_tokens=1000,
         )
 
-        print(
+        elapsed = time.perf_counter() - start
+
+        logger.info(
             "llm_call",
             extra={
                 "latency_seconds": elapsed
@@ -87,3 +95,135 @@ class AIAgentService:
         )
 
         return strip_thinking_tags(final_response.choices[0].message.content)
+
+    async def ask_stream(self, question: str):
+        messages = [{"role": "user", "content": question}]
+
+        start = time.perf_counter()
+        response = client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=messages,
+            tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
+            max_tokens=500,
+        )
+        elapsed = time.perf_counter() - start
+        logger.info("llm_call", extra={"latency_seconds": elapsed})
+
+        message = response.choices[0].message
+
+        if not message.tool_calls:
+            start = time.perf_counter()
+            stream_response = client.chat.completions.create(
+                model="qwen/qwen3.6-27b",
+                messages=messages,
+                max_tokens=1000,
+                stream=True,
+            )
+            in_think_block = False
+            buffer = ""
+            for chunk in stream_response:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
+                buffer += delta
+                while buffer:
+                    if not in_think_block:
+                        think_start = buffer.find("<think>")
+                        if think_start != -1:
+                            if think_start > 0:
+                                yield buffer[:think_start]
+                            buffer = buffer[think_start + 7 :]
+                            in_think_block = True
+                        else:
+                            if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                                break
+                            yield buffer
+                            buffer = ""
+                    else:
+                        think_end = buffer.find("</think>")
+                        if think_end != -1:
+                            buffer = buffer[think_end + 8 :]
+                            in_think_block = False
+                        else:
+                            buffer = ""
+                            break
+            if buffer and not in_think_block:
+                yield buffer
+            elapsed = time.perf_counter() - start
+            logger.info("llm_call", extra={"latency_seconds": elapsed})
+            return
+
+        messages.append(message)
+
+        for tool_call in message.tool_calls:
+            name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            if name == "get_inventory":
+                sku = arguments.get("sku")
+                result = await self.inventory_service.get_inventory(sku=sku)
+            elif name == "search_warehouse_policy":
+                query = arguments.get("query")
+                result = await self.rag_service.ask(question=query)
+            elif name == "get_order_status":
+                order_id = arguments.get("order_id")
+                if self.order_service:
+                    result = await self.order_service.get_order_status(order_id=order_id)
+                else:
+                    result = {"error": "Order service unavailable"}
+            else:
+                result = {"error": f"Unknown tool: {name}"}
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result),
+            })
+
+        start = time.perf_counter()
+        final_stream = client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=messages,
+            max_tokens=1000,
+            stream=True,
+        )
+
+        in_think_block = False
+        buffer = ""
+        for chunk in final_stream:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+            buffer += delta
+            while buffer:
+                if not in_think_block:
+                    think_start = buffer.find("<think>")
+                    if think_start != -1:
+                        if think_start > 0:
+                            yield buffer[:think_start]
+                        buffer = buffer[think_start + 7 :]
+                        in_think_block = True
+                    else:
+                        if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                            break
+                        yield buffer
+                        buffer = ""
+                else:
+                    think_end = buffer.find("</think>")
+                    if think_end != -1:
+                        buffer = buffer[think_end + 8 :]
+                        in_think_block = False
+                    else:
+                        buffer = ""
+                        break
+
+        if buffer and not in_think_block:
+            yield buffer
+
+        elapsed = time.perf_counter() - start
+        logger.info("llm_call", extra={"latency_seconds": elapsed})
+

@@ -1,22 +1,15 @@
+import logging
 import re
+import time
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.ai.client import create_embedding, client
+from app.repositories.document import DocumentRepository
+
+logger = logging.getLogger(__name__)
 
 
 def split_sentences(text: str) -> list[str]:
     return re.split(r"(?<=[.!?])\s+", text.strip())
-
-
-# def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
-
-# chunks = []
-# start = 0
-# while start < len(text):
-#     end = start + chunk_size
-
-#     chunks.append(text[start:end])
-
-#     start += chunk_size - overlap
-
-# return chunks
 
 
 def chunk_text(
@@ -46,11 +39,6 @@ def chunk_text(
         chunks.append(" ".join(current))
 
     return chunks
-
-
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.ai.client import create_embedding, client
-from app.repositories.document import DocumentRepository
 
 
 class RAGService:
@@ -98,7 +86,7 @@ class RAGService:
         if not relevant_results:
             return {
                 "answer": (
-                    "I don't know based on the " "provided warehouse documentation."
+                    "I don't know based on the provided warehouse documentation."
                 ),
                 "sources": [],
             }
@@ -138,15 +126,24 @@ class RAGService:
           """
         start = time.perf_counter()
 
-        response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
+        try:
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_answer = response.choices[0].message.content or ""
+        except Exception:
+            response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
+            raw_answer = getattr(response, "output_text", "") or ""
 
-        print(
+        elapsed = time.perf_counter() - start
+
+        logger.info(
             "llm_call",
             extra={
                 "latency_seconds": elapsed
             }
         )
-        raw_answer = response.output_text or ""
         clean_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
 
         return {
@@ -156,3 +153,97 @@ class RAGService:
                 for chunk, distance in relevant_results
             ],
         }
+
+    async def ask_stream(self, question: str, top_k: int = 5, department: str | None = None):
+        SIMILARITY_THRESHOLD = 0.35
+        query_embedding = create_embedding(question)
+        results = await self.repository.search(query_embedding, top_k, department)
+
+        relevant_results = [
+            (chunk, distance)
+            for chunk, distance in results
+            if distance <= SIMILARITY_THRESHOLD
+        ]
+
+        if not relevant_results:
+            yield "I don't know based on the provided warehouse documentation."
+            return
+
+        context_parts = []
+        for chunk, distance in relevant_results:
+            context_parts.append(f"""
+          Source: {chunk.source}
+          Chunk ID: {chunk.id}
+          distance: {distance}
+
+          {chunk.content}
+          """)
+
+        context = "\n\n".join(context_parts)
+        prompt = f"""
+          You are a warehouse assistant.
+
+          Answer the user's question using ONLY
+          the provided warehouse documentation.
+
+          Do not invent information.
+
+          If the documentation does not contain
+          the answer, say that you don't know.
+
+          Documentation:
+
+          {context}
+
+          Question:
+
+          {question}
+          """
+
+        start = time.perf_counter()
+        stream_response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+
+        in_think_block = False
+        buffer = ""
+
+        for chunk in stream_response:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+
+            buffer += delta
+
+            while buffer:
+                if not in_think_block:
+                    think_start = buffer.find("<think>")
+                    if think_start != -1:
+                        if think_start > 0:
+                            yield buffer[:think_start]
+                        buffer = buffer[think_start + 7 :]
+                        in_think_block = True
+                    else:
+                        if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                            break
+                        yield buffer
+                        buffer = ""
+                else:
+                    think_end = buffer.find("</think>")
+                    if think_end != -1:
+                        buffer = buffer[think_end + 8 :]
+                        in_think_block = False
+                    else:
+                        buffer = ""
+                        break
+
+        if buffer and not in_think_block:
+            yield buffer
+
+        elapsed = time.perf_counter() - start
+        logger.info("llm_call", extra={"latency_seconds": elapsed})
+
