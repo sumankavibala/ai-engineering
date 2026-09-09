@@ -22,11 +22,20 @@ class AIAgentService:
     async def ask(self, question: str):
         messages = [{"role": "user", "content": question}]
 
+        start = time.perf_counter()
+
         response = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=messages,
             tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
             max_tokens=500,
+        )
+
+        print(
+            "llm_call",
+            extra={
+                "latency_seconds": elapsed
+            }
         )
 
         message = response.choices[0].message
@@ -62,10 +71,19 @@ class AIAgentService:
                 "content": json.dumps(result),
             })
 
+        start = time.perf_counter()
+
         final_response = client.chat.completions.create(
             model="qwen/qwen3.6-27b",
             messages=messages,
             max_tokens=1000,
+        )
+
+        print(
+            "llm_call",
+            extra={
+                "latency_seconds": elapsed
+            }
         )
 
         return strip_thinking_tags(final_response.choices[0].message.content)

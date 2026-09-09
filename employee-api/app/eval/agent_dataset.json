@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1,
+    "question": "What is the inventory level and storage location for SKU-1001?",
+    "expected_tools": ["get_inventory"],
+    "expected_args": {
+      "sku": "SKU-1001"
+    }
+  },
+  {
+    "id": 2,
+    "question": "Where are hazardous chemicals stored according to warehouse policy?",
+    "expected_tools": ["search_warehouse_policy"],
+    "expected_args": {
+      "query": "hazardous chemicals storage"
+    }
+  },
+  {
+    "id": 3,
+    "question": "Check the status of warehouse order 50123.",
+    "expected_tools": ["get_order_status"],
+    "expected_args": {
+      "order_id": 50123
+    }
+  },
+  {
+    "id": 4,
+    "question": "Can you check if SKU-9090 is in stock and look up the receiving policy for damaged packages?",
+    "expected_tools": ["get_inventory", "search_warehouse_policy"],
+    "expected_args": {
+      "sku": "SKU-9090",
+      "query": "damaged packages receiving policy"
+    }
+  },
+  {
+    "id": 5,
+    "question": "What is the weather forecast for London tomorrow?",
+    "expected_tools": [],
+    "expected_args": {}
+  }
+]

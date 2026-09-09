@@ -136,9 +136,16 @@ class RAGService:
 
           {question}
           """
+        start = time.perf_counter()
 
         response = client.responses.create(model="openai/gpt-oss-120b", input=prompt)
 
+        print(
+            "llm_call",
+            extra={
+                "latency_seconds": elapsed
+            }
+        )
         raw_answer = response.output_text or ""
         clean_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
 

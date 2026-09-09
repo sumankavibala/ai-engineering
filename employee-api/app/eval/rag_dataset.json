@@ -1,21 +1,71 @@
 [
   {
-    "question": "What should happen to damaged goods?",
+    "id": 1,
+    "category": "answerable",
+    "question": "What should happen to damaged goods received at the loading dock?",
     "expected_source": "warehouse_receiving_policy.pdf",
-    "expected_answer": "Damaged goods must be separated from accepted inventory and reported to the warehouse supervisor."
+    "expected_answer": "Damaged goods must be separated from accepted inventory and reported to the warehouse supervisor immediately."
   },
   {
+    "id": 2,
+    "category": "answerable",
     "question": "What information must be verified during receiving?",
     "expected_source": "warehouse_receiving_policy.pdf",
     "expected_answer": "The purchase order number, supplier name, item quantity, and item condition must be verified."
   },
   {
-    "question": "Who approves high-value inventory?",
+    "id": 3,
+    "category": "answerable",
+    "question": "Who approves high-value inventory when arriving at the warehouse?",
     "expected_source": "warehouse_receiving_policy.pdf",
     "expected_answer": "High-value items require supervisor approval."
   },
   {
-    "question": "What is the company's vacation policy?",
+    "id": 4,
+    "category": "answerable",
+    "question": "What is the mandatory protocol for logging incoming shipments?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "Shipments must be scanned, matched against purchase orders, and logged into inventory within 2 hours."
+  },
+  {
+    "id": 5,
+    "category": "answerable",
+    "question": "How are perishable items handled upon arrival at receiving?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "Perishable goods must undergo temperature inspection and be transferred to cold storage within 30 minutes."
+  },
+  {
+    "id": 6,
+    "category": "answerable",
+    "question": "What safety equipment is required in the hazard storage section?",
+    "expected_source": "warehouse_safety_manual.pdf",
+    "expected_answer": "Workers must wear protective gloves, steel-toe boots, and safety goggles in the hazard storage area."
+  },
+  {
+    "id": 7,
+    "category": "semantically_tricky",
+    "question": "If a shipment arrives broken and smashed, what step is taken before signing the delivery slip?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "Document damaged goods on the bill of lading, isolate them from accepted stock, and notify the supervisor."
+  },
+  {
+    "id": 8,
+    "category": "semantically_tricky",
+    "question": "Can regular warehouse staff authorize acceptance of a $50,000 electronics crate?",
+    "expected_source": "warehouse_receiving_policy.pdf",
+    "expected_answer": "No, high-value inventory items require warehouse supervisor approval."
+  },
+  {
+    "id": 9,
+    "category": "unanswerable",
+    "question": "What is the company's annual paid leave and vacation rollover policy?",
+    "expected_source": null,
+    "expected_answer": null
+  },
+  {
+    "id": 10,
+    "category": "unanswerable",
+    "question": "What standard interest rate does accounting charge for late customer invoice payments?",
     "expected_source": null,
     "expected_answer": null
   }

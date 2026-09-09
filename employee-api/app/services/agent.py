@@ -1,5 +1,5 @@
 import json
-
+import time
 from app.ai.client import client
 from app.ai.tool_registry import TOOLS
 from app.services.tool import ToolService
@@ -41,9 +41,20 @@ class AgentService:
             8. If a request is outside the available
             tools or knowledge, say that you don't know.
             """
+
+            start = time.perf_counter()
+
             response = client.beta.chat.completions.parse(
-                model="qwen/qwen3.6-27b", messages=messages, tools=Tools, max_tokens=500, instructions=AGENT_INSTRUCTIONS
+                model="qwen/qwen3.6-27b",
+                messages=messages,
+                tools=Tools,
+                max_tokens=500,
+                instructions=AGENT_INSTRUCTIONS,
             )
+
+            elapsed = time.perf_counter() - start
+
+            print("llm_call", etra={"latency_seconds": elapsed})
 
             max_iterations = 5
 
@@ -67,19 +78,29 @@ class AgentService:
                     extra={
                         "tool": call.name,
                         "arguments": arguments,
-                        "call_id": call.call_id
-                    }
+                        "call_id": call.call_id,
+                    },
                 )
 
                 try:
+
+                    start = time.perf_counter()
+
                     result = self.tool_service.execute(
                         tool_name=call.name, arguments=arguments
                     )
+
+                    elapsed = time.perf_counter() - start
+
+                    print(
+                        "tool_call",
+                        extra={
+                            "tool": call.name,
+                            "latency_seconds": elapsed
+                        }
+                    )
                 except Exception as exc:
-                    result = {
-                        "success": False,
-                        "error": "Tool execution failed."
-                    }
+                    result = {"success": False, "error": "Tool execution failed."}
 
                 tool_outputs.append(
                     {
@@ -89,6 +110,8 @@ class AgentService:
                     }
                 )
 
+                start = time.perf_counter()
+
                 response = client.beta.chat.completions.parse(
                     model="qwen/qwen3.6-27b",
                     previous_response_id=response.id,
@@ -96,4 +119,7 @@ class AgentService:
                     tools=TOOLS,
                 )
 
+            elapsed = time.perf_counter() - start
+
+            print("llm_call", etra={"latency_seconds": elapsed})
             raise RuntimeError("Agent exceeded maximum iterations.")
