@@ -8,6 +8,12 @@ from app.ai.tools import INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL
 from app.ai.timer import Timer
 from app.ai.telemetry import TelemetryMetrics
 
+try:
+    from opentelemetry import trace
+    tracer = trace.get_tracer("employee-api.ai_agent")
+except Exception:
+    tracer = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,80 +34,121 @@ class AIAgentService:
     async def ask(self, question: str):
         telemetry = TelemetryMetrics()
         with Timer() as req_timer:
-            messages = [{"role": "user", "content": question}]
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an authorized warehouse AI assistant. You have access to tools "
+                        "for checking inventory by SKU, checking order status by order ID, and "
+                        "searching warehouse policies. Always use these tools when answering user questions."
+                    ),
+                },
+                {"role": "user", "content": question},
+            ]
 
-            with Timer() as llm1_timer:
-                response = call_with_retry(
-                    lambda: client.chat.completions.create(
-                        model="qwen/qwen3.6-27b",
-                        messages=messages,
-                        tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
-                        max_tokens=500,
+            span_context = tracer.start_as_current_span("agent_execution") if tracer else None
+            if span_context:
+                span_context.__enter__()
+
+            try:
+                with Timer() as llm1_timer:
+                    llm1_span = tracer.start_as_current_span("llm_call") if tracer else None
+                    if llm1_span:
+                        llm1_span.__enter__()
+                    try:
+                        response = call_with_retry(
+                            lambda: client.chat.completions.create(
+                                model="qwen/qwen3.6-27b",
+                                messages=messages,
+                                tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
+                                max_tokens=500,
+                            )
+                        )
+                    finally:
+                        if llm1_span:
+                            llm1_span.__exit__(None, None, None)
+
+                usage = getattr(response, "usage", None)
+                if usage:
+                    log_token_usage(usage)
+                    telemetry.add_llm_call(
+                        "qwen/qwen3.6-27b",
+                        usage.__dict__ if hasattr(usage, "__dict__") else None,
+                        llm1_timer.elapsed_ms,
                     )
-                )
+                else:
+                    telemetry.add_llm_call("qwen/qwen3.6-27b", None, llm1_timer.elapsed_ms)
 
-            usage = getattr(response, "usage", None)
-            if usage:
-                log_token_usage(usage)
-                telemetry.add_llm_call(
-                    "qwen/qwen3.6-27b",
-                    usage.__dict__ if hasattr(usage, "__dict__") else None,
-                    llm1_timer.elapsed_ms,
-                )
-            else:
-                telemetry.add_llm_call("qwen/qwen3.6-27b", None, llm1_timer.elapsed_ms)
+                logger.info("llm_call", extra={"llm_latency": llm1_timer.elapsed_ms / 1000.0})
 
-            logger.info("llm_call", extra={"llm_latency": llm1_timer.elapsed_ms / 1000.0})
+                message = response.choices[0].message
 
-            message = response.choices[0].message
+                if not message.tool_calls:
+                    telemetry.latency_ms = req_timer.elapsed_ms
+                    telemetry.log_summary()
+                    return strip_thinking_tags(message.content)
 
-            if not message.tool_calls:
-                telemetry.latency_ms = req_timer.elapsed_ms
-                telemetry.log_summary()
-                return strip_thinking_tags(message.content)
+                messages.append(message)
 
-            messages.append(message)
+                for tool_call in message.tool_calls:
+                    name = tool_call.function.name
+                    arguments = json.loads(tool_call.function.arguments)
+                    print(f"tool--->>> executing {name} with args {arguments}")
 
-            for tool_call in message.tool_calls:
-                name = tool_call.function.name
-                arguments = json.loads(tool_call.function.arguments)
+                    t_span = tracer.start_as_current_span(f"tool_call:{name}") if tracer else None
+                    if t_span:
+                        t_span.__enter__()
 
-                with Timer() as tool_timer:
-                    if name == "get_inventory":
-                        sku = arguments.get("sku")
-                        result = await self.inventory_service.get_inventory(sku=sku)
-                    elif name == "search_warehouse_policy":
-                        query = arguments.get("query")
-                        result = await self.rag_service.ask(question=query, telemetry=telemetry)
-                    elif name == "get_order_status":
-                        order_id = arguments.get("order_id")
-                        if self.order_service:
-                            result = await self.order_service.get_order_status(order_id=order_id)
-                        else:
-                            result = {"error": "Order service unavailable"}
-                    else:
-                        result = {"error": f"Unknown tool: {name}"}
+                    try:
+                        with Timer() as tool_timer:
+                            if name == "get_inventory":
+                                sku = arguments.get("sku")
+                                result = await self.inventory_service.get_inventory(sku=sku)
+                            elif name == "search_warehouse_policy":
+                                query = arguments.get("query")
+                                result = await self.rag_service.ask(question=query, telemetry=telemetry)
+                            elif name == "get_order_status":
+                                order_id = arguments.get("order_id")
+                                if self.order_service:
+                                    result = await self.order_service.get_order_status(order_id=order_id)
+                                else:
+                                    result = {"error": "Order service unavailable"}
+                            else:
+                                result = {"error": f"Unknown tool: {name}"}
+                    finally:
+                        if t_span:
+                            t_span.__exit__(None, None, None)
 
-                telemetry.add_tool_call(name, tool_timer.elapsed_ms)
-                logger.info(
-                    "tool_call",
-                    extra={"tool": name, "tool_latency": tool_timer.elapsed_ms / 1000.0},
-                )
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(result),
-                })
-
-            with Timer() as llm2_timer:
-                final_response = call_with_retry(
-                    lambda: client.chat.completions.create(
-                        model="qwen/qwen3.6-27b",
-                        messages=messages,
-                        max_tokens=1000,
+                    telemetry.add_tool_call(name, tool_timer.elapsed_ms)
+                    logger.info(
+                        "tool_call",
+                        extra={"tool": name, "tool_latency": tool_timer.elapsed_ms / 1000.0},
                     )
-                )
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result),
+                    })
+
+                with Timer() as llm2_timer:
+                    llm2_span = tracer.start_as_current_span("llm_call") if tracer else None
+                    if llm2_span:
+                        llm2_span.__enter__()
+                    try:
+                        final_response = call_with_retry(
+                            lambda: client.chat.completions.create(
+                                model="qwen/qwen3.6-27b",
+                                messages=messages,
+                                max_tokens=1000,
+                            )
+                        )
+                    finally:
+                        if llm2_span:
+                            llm2_span.__exit__(None, None, None)
+            finally:
+                if span_context:
+                    span_context.__exit__(None, None, None)
 
             final_usage = getattr(final_response, "usage", None)
             if final_usage:
@@ -123,7 +170,17 @@ class AIAgentService:
     async def ask_stream(self, question: str):
         telemetry = TelemetryMetrics()
         with Timer() as req_timer:
-            messages = [{"role": "user", "content": question}]
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an authorized warehouse AI assistant. You have access to tools "
+                        "for checking inventory by SKU, checking order status by order ID, and "
+                        "searching warehouse policies. Always use these tools when answering user questions."
+                    ),
+                },
+                {"role": "user", "content": question},
+            ]
 
             with Timer() as llm1_timer:
                 response = call_with_retry(
@@ -202,6 +259,7 @@ class AIAgentService:
             for tool_call in message.tool_calls:
                 name = tool_call.function.name
                 arguments = json.loads(tool_call.function.arguments)
+                print(f"tool--->>> executing {name} with args {arguments}")
 
                 with Timer() as tool_timer:
                     if name == "get_inventory":

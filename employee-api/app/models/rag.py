@@ -1,8 +1,8 @@
 from sqlalchemy import Text, String
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 from app.models.employee import Base
-from pgvector.sqlalchemy import VECTOR
 
 EMBEDDING_DIMESNION = 2048
 
@@ -19,7 +19,7 @@ class DocumentChunk(Base):
   )
 
   embedding = mapped_column(
-    VECTOR(EMBEDDING_DIMESNION),
+    Vector(EMBEDDING_DIMESNION),
     nullable=False
   )
 

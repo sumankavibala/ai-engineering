@@ -77,7 +77,7 @@ class RAGService:
     ):
         chunks = chunk_text(text)
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             embedding = create_embedding(chunk)
             await self.repository.create(
                 content=chunk,
@@ -85,6 +85,7 @@ class RAGService:
                 source=source,
                 document_type=document_type,
                 department=department,
+                chunk_index=i,
             )
 
         await self.repository.db.commit()

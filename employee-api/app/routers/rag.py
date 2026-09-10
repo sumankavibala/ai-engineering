@@ -31,6 +31,7 @@ async def create_user(user: UserCreate, session: AsyncSession = Depends(get_db))
 async def ingest_document(
     request: DocumentIngestRequest, db: AsyncSession = Depends(get_db)
 ):
+    print('request------>>>',request)
     try:
         service = RAGService(db)
         return await service.ingest_document(

@@ -11,12 +11,15 @@ class ToolService:
 
     def execute(self, tool_name: str, arguments: dict):
         if tool_name == "get_inventory":
+            print('tool--->>>get inventory')
             return self.inventory_service.get_inventory(sku=arguments["sku"])
 
         if tool_name == "search_warehouse_policy":
+            print('tool--->>>rag_service')
             return self.rag_service.ask(question=arguments["query"])
 
         if tool_name == "get_order_status":
+            print('tool--->>>get_order_status')
             return self.order_service.get_order_status(order_id=arguments["order_id"])
 
         raise ValueError(f"Unkown tool: {tool_name}")

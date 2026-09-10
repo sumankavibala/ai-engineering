@@ -1,7 +1,8 @@
 import logging
 import time
 import uuid
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.ai.context import set_request_id
@@ -17,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Employee AI API")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 setup_opentelemetry(app)
 
 
@@ -24,36 +38,47 @@ setup_opentelemetry(app)
 async def request_id_middleware(request: Request, call_next):
     request_id = str(uuid.uuid4())
     set_request_id(request_id)
-
-    if request.url.path.startswith("/rag"):
-        await ai_rate_limit_middleware(request)
-
-    logger.info(
-        "agent_request_started",
-        extra={
-            "request_id": request_id,
-            "path": request.url.path,
-            "method": request.method,
-        },
-    )
-
     start_time = time.perf_counter()
-    response = await call_next(request)
-    total_request_latency = time.perf_counter() - start_time
 
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = str(total_request_latency)
+    try:
+        if request.url.path.startswith("/rag"):
+            await ai_rate_limit_middleware(request)
 
-    logger.info(
-        "request_latency",
-        extra={
-            "request_id": request_id,
-            "path": request.url.path,
-            "method": request.method,
-            "total_request_latency": total_request_latency,
-        },
-    )
-    return response
+        logger.info(
+            "agent_request_started",
+            extra={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+            },
+        )
+
+        response = await call_next(request)
+        total_request_latency = time.perf_counter() - start_time
+
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time"] = str(total_request_latency)
+
+        logger.info(
+            "request_latency",
+            extra={
+                "request_id": request_id,
+                "path": request.url.path,
+                "method": request.method,
+                "total_request_latency": total_request_latency,
+            },
+        )
+        return response
+    except HTTPException as exc:
+        total_request_latency = time.perf_counter() - start_time
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers={
+                "X-Request-ID": request_id,
+                "X-Process-Time": str(total_request_latency),
+            },
+        )
 
 
 app.include_router(employee_router)
