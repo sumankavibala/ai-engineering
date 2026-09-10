@@ -13,6 +13,8 @@ RETRYABLE_EXCEPTIONS = (
     openai.APITimeoutError,
     openai.RateLimitError,
     openai.InternalServerError,
+    TimeoutError,
+    ConnectionError,
 )
 
 NON_RETRYABLE_EXCEPTIONS = (
@@ -20,6 +22,9 @@ NON_RETRYABLE_EXCEPTIONS = (
     openai.BadRequestError,
     openai.PermissionDeniedError,
     openai.NotFoundError,
+    ValueError,
+    KeyError,
+    TypeError,
 )
 
 

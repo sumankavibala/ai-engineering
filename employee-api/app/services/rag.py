@@ -1,11 +1,12 @@
 import logging
 import re
-import time
 from sqlalchemy.ext.asyncio import AsyncSession
-from langchain.tools import tool
 from app.ai.client import create_embedding, client
 from app.ai.logging_utils import log_token_usage
 from app.ai.retry import call_with_retry
+from app.ai.timer import Timer
+from app.ai.telemetry import TelemetryMetrics
+from app.ai.cache import policy_cache
 from app.repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
@@ -18,30 +19,45 @@ def split_sentences(text: str) -> list[str]:
 def chunk_text(
     text: str, max_chars: int = 800, overlap_sentences: int = 1
 ) -> list[str]:
-
     sentences = split_sentences(text)
-
     chunks = []
     current = []
 
     for sentence in sentences:
-
         candidate = " ".join(current + [sentence])
-
         if len(candidate) <= max_chars or not current:
             current.append(sentence)
-
         else:
             chunks.append(" ".join(current))
-
             overlap = current[-overlap_sentences:]
-
             current = overlap + [sentence]
 
     if current:
         chunks.append(" ".join(current))
 
     return chunks
+
+
+def rerank_chunks(query: str, results: list, max_keep: int = 5) -> list:
+    """Rerank retrieved chunks by combined similarity distance and query term overlap score.
+    Returns top 3 to 5 highest quality chunks.
+    """
+    if not results:
+        return []
+
+    query_words = set(re.findall(r"\w+", query.lower()))
+    scored_results = []
+
+    for chunk, distance in results:
+        chunk_words = set(re.findall(r"\w+", chunk.content.lower()))
+        overlap_score = len(query_words.intersection(chunk_words)) / max(len(query_words), 1)
+        # Higher relevance score = lower distance + high term overlap
+        combined_score = (1.0 - distance) + (overlap_score * 0.5)
+        scored_results.append((combined_score, chunk, distance))
+
+    scored_results.sort(key=lambda x: x[0], reverse=True)
+    top_results = [(chunk, dist) for score, chunk, dist in scored_results[:max_keep]]
+    return top_results
 
 
 class RAGService:
@@ -63,7 +79,6 @@ class RAGService:
 
         for chunk in chunks:
             embedding = create_embedding(chunk)
-
             await self.repository.create(
                 content=chunk,
                 embedding=embedding,
@@ -73,50 +88,58 @@ class RAGService:
             )
 
         await self.repository.db.commit()
+        policy_cache.clear()
         return {"chunks_created": len(chunks)}
 
-    async def ask(self, question: str, top_k: int = 5, department: str | None = None):
+    async def ask(
+        self,
+        question: str,
+        top_k: int = 5,
+        department: str | None = None,
+        telemetry: TelemetryMetrics | None = None,
+    ):
+        cached_res = policy_cache.get(question, department)
+        if cached_res:
+            logger.info("policy_cache_hit", extra={"question": question})
+            return cached_res
 
         SIMILARITY_THRESHOLD = 0.35
-        # 1. Embed question and 2. Retrieve relevant chunks
-        retrieval_start = time.perf_counter()
-        query_embedding = create_embedding(question)
-        results = await self.repository.search(query_embedding, top_k, department)
-        rag_retrieval_latency = time.perf_counter() - retrieval_start
+        # Retrieve candidate chunks (e.g. 10) then rerank to top 3-5 chunks
+        candidate_k = max(top_k, 10)
+        with Timer() as timer:
+            query_embedding = create_embedding(question)
+            results = await self.repository.search(query_embedding, candidate_k, department)
+
+        if telemetry:
+            telemetry.add_retrieval_call(timer.elapsed_ms)
 
         logger.info(
             "rag_retrieval",
-            extra={"rag_retrieval_latency": rag_retrieval_latency, "latency_seconds": rag_retrieval_latency}
+            extra={"rag_retrieval_latency": timer.elapsed_ms / 1000.0, "latency_seconds": timer.elapsed_ms / 1000.0},
         )
 
         relevant_results = [
-            (chunk, distance)
-            for chunk, distance in results
-            if distance <= SIMILARITY_THRESHOLD
+            (chunk, distance) for chunk, distance in results if distance <= SIMILARITY_THRESHOLD
         ]
 
-        if not relevant_results:
-            return {
-                "answer": (
-                    "I don't know based on the provided warehouse documentation."
-                ),
+        # Rerank and select top 3 to 5 chunks
+        reranked_results = rerank_chunks(question, relevant_results, max_keep=min(top_k, 5))
+
+        if not reranked_results:
+            no_info_res = {
+                "answer": "I don't know based on the provided warehouse documentation.",
                 "sources": [],
             }
+            policy_cache.set(question, no_info_res, department)
+            return no_info_res
 
         context_parts = []
+        for chunk, distance in reranked_results:
+            context_parts.append(
+                f"Source: {chunk.source}\nChunk ID: {chunk.id}\ndistance: {distance}\n\n{chunk.content}"
+            )
 
-        for chunk, distance in relevant_results:
-            context_parts.append(f"""
-          Source: {chunk.source}
-          Chunk ID: {chunk.id}
-          distance: {distance}
-
-          {chunk.content}
-          """)
-
-        # 3. Build context
         context = "\n\n".join(context_parts)
-
         prompt = f"""
           You are a warehouse assistant.
 
@@ -136,76 +159,79 @@ class RAGService:
 
           {question}
           """
-        start = time.perf_counter()
 
-        try:
-            response = call_with_retry(
-                lambda: client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages=[{"role": "user", "content": prompt}],
+        with Timer() as llm_timer:
+            try:
+                response = call_with_retry(
+                    lambda: client.chat.completions.create(
+                        model="openai/gpt-oss-120b",
+                        messages=[{"role": "user", "content": prompt}],
+                    )
                 )
-            )
-            raw_answer = response.choices[0].message.content or ""
-            if getattr(response, "usage", None):
-                log_token_usage(response.usage)
-        except Exception:
-            response = call_with_retry(
-                lambda: client.responses.create(model="openai/gpt-oss-120b", input=prompt)
-            )
-            raw_answer = getattr(response, "output_text", "") or ""
-            if getattr(response, "usage", None):
-                log_token_usage(response.usage)
+                raw_answer = response.choices[0].message.content or ""
+                usage = getattr(response, "usage", None)
+            except Exception:
+                response = call_with_retry(
+                    lambda: client.responses.create(model="openai/gpt-oss-120b", input=prompt)
+                )
+                raw_answer = getattr(response, "output_text", "") or ""
+                usage = getattr(response, "usage", None)
 
-        elapsed = time.perf_counter() - start
+        if usage:
+            log_token_usage(usage)
+        if telemetry:
+            telemetry.add_llm_call("openai/gpt-oss-120b", usage.__dict__ if hasattr(usage, "__dict__") else None, llm_timer.elapsed_ms)
 
-        logger.info(
-            "llm_call",
-            extra={
-                "llm_latency": elapsed,
-                "latency_seconds": elapsed
-            }
-        )
+        logger.info("llm_call", extra={"llm_latency": llm_timer.elapsed_ms / 1000.0, "latency_seconds": llm_timer.elapsed_ms / 1000.0})
         clean_answer = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL).strip()
 
-        return {
+        result_payload = {
             "answer": clean_answer,
             "sources": [
                 {"chunk_id": chunk.id, "source": chunk.source, "distance": distance}
-                for chunk, distance in relevant_results
+                for chunk, distance in reranked_results
             ],
         }
 
-    async def ask_stream(self, question: str, top_k: int = 5, department: str | None = None):
+        policy_cache.set(question, result_payload, department)
+        return result_payload
+
+    async def ask_stream(
+        self,
+        question: str,
+        top_k: int = 5,
+        department: str | None = None,
+        telemetry: TelemetryMetrics | None = None,
+    ):
         SIMILARITY_THRESHOLD = 0.35
-        retrieval_start = time.perf_counter()
-        query_embedding = create_embedding(question)
-        results = await self.repository.search(query_embedding, top_k, department)
-        rag_retrieval_latency = time.perf_counter() - retrieval_start
+        candidate_k = max(top_k, 10)
+        with Timer() as timer:
+            query_embedding = create_embedding(question)
+            results = await self.repository.search(query_embedding, candidate_k, department)
+
+        if telemetry:
+            telemetry.add_retrieval_call(timer.elapsed_ms)
 
         logger.info(
             "rag_retrieval",
-            extra={"rag_retrieval_latency": rag_retrieval_latency, "latency_seconds": rag_retrieval_latency}
+            extra={"rag_retrieval_latency": timer.elapsed_ms / 1000.0, "latency_seconds": timer.elapsed_ms / 1000.0},
         )
 
         relevant_results = [
-            (chunk, distance)
-            for chunk, distance in results
-            if distance <= SIMILARITY_THRESHOLD
+            (chunk, distance) for chunk, distance in results if distance <= SIMILARITY_THRESHOLD
         ]
 
-        if not relevant_results:
+        reranked_results = rerank_chunks(question, relevant_results, max_keep=min(top_k, 5))
+
+        if not reranked_results:
             yield "I don't know based on the provided warehouse documentation."
             return
 
         context_parts = []
-        for chunk, distance in relevant_results:
-            context_parts.append(f"""
-          Source: {chunk.source}
-          Chunk ID: {chunk.id}
-          distance: {distance}
-
-          {chunk.content}
-          """)
+        for chunk, distance in reranked_results:
+            context_parts.append(
+                f"Source: {chunk.source}\nChunk ID: {chunk.id}\ndistance: {distance}\n\n{chunk.content}"
+            )
 
         context = "\n\n".join(context_parts)
         prompt = f"""
@@ -228,55 +254,56 @@ class RAGService:
           {question}
           """
 
-        start = time.perf_counter()
-        stream_response = call_with_retry(
-            lambda: client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[{"role": "user", "content": prompt}],
-                stream=True,
-                stream_options={"include_usage": True},
+        with Timer() as llm_timer:
+            stream_response = call_with_retry(
+                lambda: client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
             )
-        )
 
-        in_think_block = False
-        buffer = ""
+            in_think_block = False
+            buffer = ""
 
-        for chunk in stream_response:
-            if getattr(chunk, "usage", None):
-                log_token_usage(chunk.usage)
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = chunk.choices[0].delta.content or ""
-            if not delta:
-                continue
+            for chunk in stream_response:
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    log_token_usage(usage)
+                    if telemetry:
+                        telemetry.add_llm_call("openai/gpt-oss-120b", usage.__dict__ if hasattr(usage, "__dict__") else None, llm_timer.elapsed_ms)
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
 
-            buffer += delta
+                buffer += delta
 
-            while buffer:
-                if not in_think_block:
-                    think_start = buffer.find("<think>")
-                    if think_start != -1:
-                        if think_start > 0:
-                            yield buffer[:think_start]
-                        buffer = buffer[think_start + 7 :]
-                        in_think_block = True
+                while buffer:
+                    if not in_think_block:
+                        think_start = buffer.find("<think>")
+                        if think_start != -1:
+                            if think_start > 0:
+                                yield buffer[:think_start]
+                            buffer = buffer[think_start + 7 :]
+                            in_think_block = True
+                        else:
+                            if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                                break
+                            yield buffer
+                            buffer = ""
                     else:
-                        if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                        think_end = buffer.find("</think>")
+                        if think_end != -1:
+                            buffer = buffer[think_end + 8 :]
+                            in_think_block = False
+                        else:
+                            buffer = ""
                             break
-                        yield buffer
-                        buffer = ""
-                else:
-                    think_end = buffer.find("</think>")
-                    if think_end != -1:
-                        buffer = buffer[think_end + 8 :]
-                        in_think_block = False
-                    else:
-                        buffer = ""
-                        break
 
-        if buffer and not in_think_block:
-            yield buffer
+            if buffer and not in_think_block:
+                yield buffer
 
-        elapsed = time.perf_counter() - start
-        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
-
+        logger.info("llm_call", extra={"llm_latency": llm_timer.elapsed_ms / 1000.0, "latency_seconds": llm_timer.elapsed_ms / 1000.0})

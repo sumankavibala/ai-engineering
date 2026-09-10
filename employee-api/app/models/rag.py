@@ -1,10 +1,8 @@
 from sqlalchemy import Text, String
-from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
+from sqlalchemy.orm import Mapped, mapped_column
 
+from app.models.employee import Base
 from pgvector.sqlalchemy import VECTOR
-
-class Base(DeclarativeBase):
-  pass
 
 EMBEDDING_DIMESNION = 2048
 

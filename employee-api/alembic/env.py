@@ -11,25 +11,12 @@ from app.config import settings
 from app.models.employee import Base
 import app.models.user
 import app.models.employee
-
-import socket
-
-db_host = settings.database_host
-if db_host == "db":
-    try:
-        socket.gethostbyname("db")
-    except socket.gaierror:
-        db_host = "localhost"
-
-url = (
-    f"postgresql+asyncpg://"
-    f"{settings.database_user}:{settings.database_password}"
-    f"@{db_host}:{settings.database_port}"
-    f"/{settings.database_name}"
-)
+import app.models.inventory
+import app.models.order
+import app.models.rag
 
 config = context.config
-config.set_main_option("sqlalchemy.url", url)
+config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -1,12 +1,12 @@
 import json
 import logging
 import re
-import time
-
 from app.ai.client import client
 from app.ai.logging_utils import log_token_usage
 from app.ai.retry import call_with_retry
 from app.ai.tools import INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL
+from app.ai.timer import Timer
+from app.ai.telemetry import TelemetryMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 def strip_thinking_tags(text: str | None) -> str:
     if not text:
         return ""
-    # Strip complete <think>...</think> blocks as well as unclosed <think>... blocks
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
     return text.strip()
+
 
 class AIAgentService:
     def __init__(self, inventory_service, rag_service, order_service=None):
@@ -26,251 +26,258 @@ class AIAgentService:
         self.order_service = order_service
 
     async def ask(self, question: str):
-        messages = [{"role": "user", "content": question}]
+        telemetry = TelemetryMetrics()
+        with Timer() as req_timer:
+            messages = [{"role": "user", "content": question}]
 
-        start = time.perf_counter()
+            with Timer() as llm1_timer:
+                response = call_with_retry(
+                    lambda: client.chat.completions.create(
+                        model="qwen/qwen3.6-27b",
+                        messages=messages,
+                        tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
+                        max_tokens=500,
+                    )
+                )
 
-        response = call_with_retry(
-            lambda: client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
-                messages=messages,
-                tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
-                max_tokens=500,
-            )
-        )
-
-        elapsed = time.perf_counter() - start
-        if getattr(response, "usage", None):
-            log_token_usage(response.usage)
-
-        logger.info(
-            "llm_call",
-            extra={
-                "llm_latency": elapsed,
-                "latency_seconds": elapsed
-            }
-        )
-
-        message = response.choices[0].message
-
-        if not message.tool_calls:
-            return strip_thinking_tags(message.content)
-
-        messages.append(message)
-
-        for tool_call in message.tool_calls:
-            name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
-
-            tool_start = time.perf_counter()
-            if name == "get_inventory":
-                sku = arguments.get("sku")
-                result = await self.inventory_service.get_inventory(sku=sku)
-            elif name == "search_warehouse_policy":
-                query = arguments.get("query")
-                result = await self.rag_service.ask(question=query)
-            elif name == "get_order_status":
-                order_id = arguments.get("order_id")
-                if self.order_service:
-                    result = await self.order_service.get_order_status(order_id=order_id)
-                else:
-                    result = {"error": "Order service unavailable"}
+            usage = getattr(response, "usage", None)
+            if usage:
+                log_token_usage(usage)
+                telemetry.add_llm_call(
+                    "qwen/qwen3.6-27b",
+                    usage.__dict__ if hasattr(usage, "__dict__") else None,
+                    llm1_timer.elapsed_ms,
+                )
             else:
-                result = {"error": f"Unknown tool: {name}"}
+                telemetry.add_llm_call("qwen/qwen3.6-27b", None, llm1_timer.elapsed_ms)
 
-            tool_elapsed = time.perf_counter() - tool_start
-            logger.info(
-                "tool_call",
-                extra={
-                    "tool": name,
-                    "tool_latency": tool_elapsed,
-                    "latency_seconds": tool_elapsed
-                }
-            )
+            logger.info("llm_call", extra={"llm_latency": llm1_timer.elapsed_ms / 1000.0})
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result),
-            })
+            message = response.choices[0].message
 
-        start = time.perf_counter()
+            if not message.tool_calls:
+                telemetry.latency_ms = req_timer.elapsed_ms
+                telemetry.log_summary()
+                return strip_thinking_tags(message.content)
 
-        final_response = call_with_retry(
-            lambda: client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
-                messages=messages,
-                max_tokens=1000,
-            )
-        )
+            messages.append(message)
 
-        elapsed = time.perf_counter() - start
-        if getattr(final_response, "usage", None):
-            log_token_usage(final_response.usage)
+            for tool_call in message.tool_calls:
+                name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
 
-        logger.info(
-            "llm_call",
-            extra={
-                "llm_latency": elapsed,
-                "latency_seconds": elapsed
-            }
-        )
+                with Timer() as tool_timer:
+                    if name == "get_inventory":
+                        sku = arguments.get("sku")
+                        result = await self.inventory_service.get_inventory(sku=sku)
+                    elif name == "search_warehouse_policy":
+                        query = arguments.get("query")
+                        result = await self.rag_service.ask(question=query, telemetry=telemetry)
+                    elif name == "get_order_status":
+                        order_id = arguments.get("order_id")
+                        if self.order_service:
+                            result = await self.order_service.get_order_status(order_id=order_id)
+                        else:
+                            result = {"error": "Order service unavailable"}
+                    else:
+                        result = {"error": f"Unknown tool: {name}"}
 
+                telemetry.add_tool_call(name, tool_timer.elapsed_ms)
+                logger.info(
+                    "tool_call",
+                    extra={"tool": name, "tool_latency": tool_timer.elapsed_ms / 1000.0},
+                )
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result),
+                })
+
+            with Timer() as llm2_timer:
+                final_response = call_with_retry(
+                    lambda: client.chat.completions.create(
+                        model="qwen/qwen3.6-27b",
+                        messages=messages,
+                        max_tokens=1000,
+                    )
+                )
+
+            final_usage = getattr(final_response, "usage", None)
+            if final_usage:
+                log_token_usage(final_usage)
+                telemetry.add_llm_call(
+                    "qwen/qwen3.6-27b",
+                    final_usage.__dict__ if hasattr(final_usage, "__dict__") else None,
+                    llm2_timer.elapsed_ms,
+                )
+            else:
+                telemetry.add_llm_call("qwen/qwen3.6-27b", None, llm2_timer.elapsed_ms)
+
+            logger.info("llm_call", extra={"llm_latency": llm2_timer.elapsed_ms / 1000.0})
+
+        telemetry.latency_ms = req_timer.elapsed_ms
+        telemetry.log_summary()
         return strip_thinking_tags(final_response.choices[0].message.content)
 
     async def ask_stream(self, question: str):
-        messages = [{"role": "user", "content": question}]
+        telemetry = TelemetryMetrics()
+        with Timer() as req_timer:
+            messages = [{"role": "user", "content": question}]
 
-        start = time.perf_counter()
-        response = call_with_retry(
-            lambda: client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
-                messages=messages,
-                tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
-                max_tokens=500,
-            )
-        )
-        elapsed = time.perf_counter() - start
-        if getattr(response, "usage", None):
-            log_token_usage(response.usage)
-        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
-
-        message = response.choices[0].message
-
-        if not message.tool_calls:
-            start = time.perf_counter()
-            stream_response = call_with_retry(
-                lambda: client.chat.completions.create(
-                    model="qwen/qwen3.6-27b",
-                    messages=messages,
-                    max_tokens=1000,
-                    stream=True,
-                    stream_options={"include_usage": True},
+            with Timer() as llm1_timer:
+                response = call_with_retry(
+                    lambda: client.chat.completions.create(
+                        model="qwen/qwen3.6-27b",
+                        messages=messages,
+                        tools=[INVENTORY_TOOL, POLICY_SEARCH_TOOL, ORDER_STATUS_TOOL],
+                        max_tokens=500,
+                    )
                 )
-            )
-            in_think_block = False
-            buffer = ""
-            for chunk in stream_response:
-                if getattr(chunk, "usage", None):
-                    log_token_usage(chunk.usage)
-                if not getattr(chunk, "choices", None):
-                    continue
-                delta = chunk.choices[0].delta.content or ""
-                if not delta:
-                    continue
-                buffer += delta
-                while buffer:
-                    if not in_think_block:
-                        think_start = buffer.find("<think>")
-                        if think_start != -1:
-                            if think_start > 0:
-                                yield buffer[:think_start]
-                            buffer = buffer[think_start + 7 :]
-                            in_think_block = True
-                        else:
-                            if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
-                                break
-                            yield buffer
-                            buffer = ""
-                    else:
-                        think_end = buffer.find("</think>")
-                        if think_end != -1:
-                            buffer = buffer[think_end + 8 :]
-                            in_think_block = False
-                        else:
-                            buffer = ""
-                            break
-            if buffer and not in_think_block:
-                yield buffer
-            elapsed = time.perf_counter() - start
-            logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
-            return
 
-        messages.append(message)
-
-        for tool_call in message.tool_calls:
-            name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments)
-
-            tool_start = time.perf_counter()
-            if name == "get_inventory":
-                sku = arguments.get("sku")
-                result = await self.inventory_service.get_inventory(sku=sku)
-            elif name == "search_warehouse_policy":
-                query = arguments.get("query")
-                result = await self.rag_service.ask(question=query)
-            elif name == "get_order_status":
-                order_id = arguments.get("order_id")
-                if self.order_service:
-                    result = await self.order_service.get_order_status(order_id=order_id)
-                else:
-                    result = {"error": "Order service unavailable"}
+            usage = getattr(response, "usage", None)
+            if usage:
+                log_token_usage(usage)
+                telemetry.add_llm_call("qwen/qwen3.6-27b", usage.__dict__ if hasattr(usage, "__dict__") else None, llm1_timer.elapsed_ms)
             else:
-                result = {"error": f"Unknown tool: {name}"}
+                telemetry.add_llm_call("qwen/qwen3.6-27b", None, llm1_timer.elapsed_ms)
 
-            tool_elapsed = time.perf_counter() - tool_start
-            logger.info(
-                "tool_call",
-                extra={
-                    "tool": name,
-                    "tool_latency": tool_elapsed,
-                    "latency_seconds": tool_elapsed
-                }
-            )
+            logger.info("llm_call", extra={"llm_latency": llm1_timer.elapsed_ms / 1000.0})
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result),
-            })
+            message = response.choices[0].message
 
-        start = time.perf_counter()
-        final_stream = call_with_retry(
-            lambda: client.chat.completions.create(
-                model="qwen/qwen3.6-27b",
-                messages=messages,
-                max_tokens=1000,
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-        )
-
-        in_think_block = False
-        buffer = ""
-        for chunk in final_stream:
-            if getattr(chunk, "usage", None):
-                log_token_usage(chunk.usage)
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = chunk.choices[0].delta.content or ""
-            if not delta:
-                continue
-            buffer += delta
-            while buffer:
-                if not in_think_block:
-                    think_start = buffer.find("<think>")
-                    if think_start != -1:
-                        if think_start > 0:
-                            yield buffer[:think_start]
-                        buffer = buffer[think_start + 7 :]
-                        in_think_block = True
-                    else:
-                        if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
-                            break
+            if not message.tool_calls:
+                with Timer() as stream_timer:
+                    stream_response = call_with_retry(
+                        lambda: client.chat.completions.create(
+                            model="qwen/qwen3.6-27b",
+                            messages=messages,
+                            max_tokens=1000,
+                            stream=True,
+                            stream_options={"include_usage": True},
+                        )
+                    )
+                    in_think_block = False
+                    buffer = ""
+                    for chunk in stream_response:
+                        c_usage = getattr(chunk, "usage", None)
+                        if c_usage:
+                            log_token_usage(c_usage)
+                        if not getattr(chunk, "choices", None):
+                            continue
+                        delta = chunk.choices[0].delta.content or ""
+                        if not delta:
+                            continue
+                        buffer += delta
+                        while buffer:
+                            if not in_think_block:
+                                think_start = buffer.find("<think>")
+                                if think_start != -1:
+                                    if think_start > 0:
+                                        yield buffer[:think_start]
+                                    buffer = buffer[think_start + 7 :]
+                                    in_think_block = True
+                                else:
+                                    if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                                        break
+                                    yield buffer
+                                    buffer = ""
+                            else:
+                                think_end = buffer.find("</think>")
+                                if think_end != -1:
+                                    buffer = buffer[think_end + 8 :]
+                                    in_think_block = False
+                                else:
+                                    buffer = ""
+                                    break
+                    if buffer and not in_think_block:
                         yield buffer
-                        buffer = ""
-                else:
-                    think_end = buffer.find("</think>")
-                    if think_end != -1:
-                        buffer = buffer[think_end + 8 :]
-                        in_think_block = False
+
+                telemetry.latency_ms = req_timer.elapsed_ms
+                telemetry.log_summary()
+                return
+
+            messages.append(message)
+
+            for tool_call in message.tool_calls:
+                name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+
+                with Timer() as tool_timer:
+                    if name == "get_inventory":
+                        sku = arguments.get("sku")
+                        result = await self.inventory_service.get_inventory(sku=sku)
+                    elif name == "search_warehouse_policy":
+                        query = arguments.get("query")
+                        result = await self.rag_service.ask(question=query, telemetry=telemetry)
+                    elif name == "get_order_status":
+                        order_id = arguments.get("order_id")
+                        if self.order_service:
+                            result = await self.order_service.get_order_status(order_id=order_id)
+                        else:
+                            result = {"error": "Order service unavailable"}
                     else:
-                        buffer = ""
-                        break
+                        result = {"error": f"Unknown tool: {name}"}
 
-        if buffer and not in_think_block:
-            yield buffer
+                telemetry.add_tool_call(name, tool_timer.elapsed_ms)
+                logger.info(
+                    "tool_call",
+                    extra={"tool": name, "tool_latency": tool_timer.elapsed_ms / 1000.0},
+                )
 
-        elapsed = time.perf_counter() - start
-        logger.info("llm_call", extra={"llm_latency": elapsed, "latency_seconds": elapsed})
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result),
+                })
 
+            with Timer() as stream_timer:
+                final_stream = call_with_retry(
+                    lambda: client.chat.completions.create(
+                        model="qwen/qwen3.6-27b",
+                        messages=messages,
+                        max_tokens=1000,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                    )
+                )
+
+                in_think_block = False
+                buffer = ""
+                for chunk in final_stream:
+                    c_usage = getattr(chunk, "usage", None)
+                    if c_usage:
+                        log_token_usage(c_usage)
+                    if not getattr(chunk, "choices", None):
+                        continue
+                    delta = chunk.choices[0].delta.content or ""
+                    if not delta:
+                        continue
+                    buffer += delta
+                    while buffer:
+                        if not in_think_block:
+                            think_start = buffer.find("<think>")
+                            if think_start != -1:
+                                if think_start > 0:
+                                    yield buffer[:think_start]
+                                buffer = buffer[think_start + 7 :]
+                                in_think_block = True
+                            else:
+                                if any("<think>"[:i] == buffer[-i:] for i in range(1, len("<think>"))):
+                                    break
+                                yield buffer
+                                buffer = ""
+                        else:
+                            think_end = buffer.find("</think>")
+                            if think_end != -1:
+                                buffer = buffer[think_end + 8 :]
+                                in_think_block = False
+                            else:
+                                buffer = ""
+                                break
+
+                if buffer and not in_think_block:
+                    yield buffer
+
+        telemetry.latency_ms = req_timer.elapsed_ms
+        telemetry.log_summary()
