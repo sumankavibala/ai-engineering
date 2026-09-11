@@ -18,24 +18,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Employee AI API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-setup_opentelemetry(app)
-
-
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     request_id = str(uuid.uuid4())
     set_request_id(request_id)
     start_time = time.perf_counter()
@@ -79,6 +66,15 @@ async def request_id_middleware(request: Request, call_next):
                 "X-Process-Time": str(total_request_latency),
             },
         )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 app.include_router(employee_router)
